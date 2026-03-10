@@ -2,7 +2,11 @@
 
 const puppeteer = require("puppeteer");
 const fs = require("fs");
-const { uploadToS3 } = require("../services/s3Service");
+const config = require("../config");
+const { uploadToS3, listObjectsInS3, getObjectFromS3 } = require("../services/s3Service");
+const { enrichEventWithFashion } = require("../services/aiService");
+const { matchProducts } = require("../services/productService");
+const { generateEventId } = require("../utils/slugify");
 
 // ─── LISTING URLs ──────────────────────────────────────────────────────────────
 const CATEGORIES = [
@@ -200,162 +204,160 @@ async function scrapeDetail(page, linkObj) {
 // ─── MAIN EXPORTED FUNCTION ───────────────────────────────────────────────────
 async function runScraper() {
     console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("  🎟️  BookMyShow Bengaluru — Full Detail Scraper");
+    console.log("  🎟️  BookMyShow Bengaluru — End-to-End Pipeline");
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     let browser;
     try {
         browser = await puppeteer.launch({
             headless: true,
-            args: [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--window-size=1366,900",
-            ],
-            defaultViewport: { width: 1366, height: 900 },
+            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
         });
 
         const page = await browser.newPage();
+        await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
-        await page.setUserAgent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        );
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, "webdriver", { get: () => false });
-        });
-
-        const cdp = await page.target().createCDPSession();
-        await cdp.send("Emulation.setGeolocationOverride", {
-            latitude: 12.9716, longitude: 77.5946, accuracy: 100,
-        });
-
-        await page.setRequestInterception(true);
-        page.on("request", (req) => {
-            if (req.resourceType() === "font") req.abort();
-            else req.continue();
-        });
-
-        // ── Phase 1 ──────────────────────────────────────────────────────────────
-        console.log("📋 PHASE 1 — Collecting event links from listing pages...");
+        // ── Phase 1: Scrape BMS ──────────────────────────────────────────────────
+        console.log("📋 PHASE 1 — Collecting event links...");
         const allLinks = [];
         for (const cat of CATEGORIES) {
             const links = await getLinks(page, cat);
-            for (const l of links) allLinks.push({ ...l, category: cat.category, emoji: cat.emoji });
-            await sleep(1500);
+            allLinks.push(...links.map(l => ({ ...l, category: cat.category, emoji: cat.emoji })));
+            await sleep(1000);
         }
-        console.log(`\n✅ Total links collected: ${allLinks.length}`);
 
-        // ── Phase 2 ──────────────────────────────────────────────────────────────
-        console.log("\n🔍 PHASE 2 — Scraping full details from each page...\n");
-        const allItems = [];
-
+        console.log("\n🔍 PHASE 2 — Scraping details & generating IDs...");
+        const allScrapedEvents = [];
         for (let i = 0; i < allLinks.length; i++) {
             const linkObj = allLinks[i];
-            process.stdout.write(
-                `  [${String(i + 1).padStart(3)}/${allLinks.length}] ${linkObj.emoji} ${linkObj.quickTitle?.slice(0, 45) || linkObj.link.slice(-30)}...`
-            );
-
             const detail = await scrapeDetail(page, linkObj);
             const meta = parseMetaBlock(detail.metaRaw);
+            const id = generateEventId(detail.title, meta.date);
 
             const scoreText = [detail.title, meta.genres, detail.description, meta.language, linkObj.category].join(" ");
             const genZScore = getGenZScore(scoreText, linkObj.category);
 
-            allItems.push({
+            allScrapedEvents.push({
+                id,
                 category: linkObj.category,
                 emoji: linkObj.emoji,
-                city: "Bengaluru",
-                title: detail.title || linkObj.quickTitle,
-                date: meta.date || null,
-                duration: meta.duration || null,
-                genres: meta.genres || null,
-                certification: meta.certification || null,
-                language: meta.language || null,
-                format: meta.format || null,
-                description: detail.description || null,
-                cast: detail.cast || null,
-                crew: detail.crew || null,
-                interested: detail.interested || null,
-                image: detail.image || linkObj.image || null,
-                link: detail.link || linkObj.link,
+                city: config.pipeline.targetCity,
+                title: detail.title,
+                date: meta.date,
+                duration: meta.duration,
+                genres: meta.genres,
+                certification: meta.certification,
+                language: meta.language,
+                description: detail.description,
+                cast: detail.cast,
+                interested: detail.interested,
                 genZScore,
                 genZRelevance: genZLabel(genZScore),
+                image: detail.image,
+                link: detail.link,
+            });
+            process.stdout.write(".");
+        }
+        console.log(`\n✅ Scraped ${allScrapedEvents.length} events.`);
+
+        // ── Phase 2: Fetch Existing from S3 ──────────────────────────────────────
+        const now = new Date();
+        const monthPath = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}/`;
+        console.log(`\n☁️  PHASE 3 — Diffing against S3: ${monthPath}`);
+
+        const existingFiles = await listObjectsInS3(monthPath);
+        const existingEventsMap = {};
+
+        for (const file of existingFiles) {
+            if (file.Key.endsWith(".json")) {
+                const content = await getObjectFromS3(file.Key);
+                if (content) {
+                    try {
+                        const data = JSON.parse(content);
+                        (data.events || []).forEach(e => { existingEventsMap[e.id] = e; });
+                    } catch (e) {
+                        console.warn(`⚠️  Failed to parse ${file.Key}`);
+                    }
+                }
+            }
+        }
+
+        // ── Phase 3: Diff ────────────────────────────────────────────────────────
+        const newEvents = allScrapedEvents.filter(e => !existingEventsMap[e.id] && e.genZScore >= 4);
+        console.log(`📊 ${newEvents.length} new events found, ${allScrapedEvents.length - newEvents.length} existing or low-score — skipping.`);
+
+        // ── Phase 4: AI Enrichment & Matching ────────────────────────────────────
+        if (newEvents.length > 0) {
+            console.log(`\n🤖 PHASE 4 — AI Enrichment & Product Matching...`);
+            for (let i = 0; i < newEvents.length; i++) {
+                const event = newEvents[i];
+                process.stdout.write(`  [${i + 1}/${newEvents.length}] ${event.title.slice(0, 30)}...`);
+
+                // Enrichment with retry
+                let enriched = null;
+                for (let attempt = 1; attempt <= 2; attempt++) {
+                    try {
+                        enriched = await enrichEventWithFashion(event);
+                        if (enriched && enriched.fashion_keywords) break;
+                    } catch (e) {
+                        console.warn(` retry ${attempt}...`);
+                    }
+                }
+
+                if (enriched) {
+                    Object.assign(event, enriched);
+                    // Product Matching
+                    event.products = await matchProducts(event);
+                    console.log(` ✓ (${event.products.length} products)`);
+                } else {
+                    console.log(" ❌ failed");
+                }
+                await sleep(500);
+            }
+        }
+
+        // ── Phase 5: Group & Upload ──────────────────────────────────────────────
+        console.log(`\n💾 PHASE 5 — Merging & Uploading to S3...`);
+        const groups = {};
+        newEvents.forEach(e => {
+            const dayMatch = e.id.match(/_(\d{2})_/);
+            const day = dayMatch ? dayMatch[1] : String(now.getDate()).padStart(2, '0');
+            if (!groups[day]) groups[day] = [];
+            groups[day].push(e);
+        });
+
+        for (const [day, events] of Object.entries(groups)) {
+            const key = `${monthPath}${day}.json`;
+            console.log(`  Merging ${events.length} events into ${key}...`);
+
+            let existingContent = await getObjectFromS3(key);
+            let dayData = { date: `${monthPath.split('-')[1].replace('/', '')}-${day}`, events: [], last_updated: "" };
+
+            if (existingContent) {
+                try {
+                    dayData = JSON.parse(existingContent);
+                } catch (e) { console.warn(`⚠️  Overwrite malformed ${key}`); }
+            }
+
+            // Append & De-dupe
+            const existingIds = new Set(dayData.events.map(e => e.id));
+            events.forEach(e => {
+                if (!existingIds.has(e.id)) {
+                    dayData.events.push(e);
+                    existingIds.add(e.id);
+                }
             });
 
-            console.log(` ✓ (GenZ: ${genZScore})`);
-            await sleep(800);
+            dayData.last_updated = new Date().toISOString();
+            await uploadToS3(key, JSON.stringify(dayData, null, 2), "application/json");
         }
 
-        // ── Filter, Sort & Group ──────────────────────────────────────────────────
-        // Only keep events with Gen Z score >= 4 (High and Very High relevance)
-        const highScoringEvents = allItems.filter(e => e.genZScore >= 4);
-        const sorted = [...highScoringEvents].sort((a, b) => b.genZScore - a.genZScore);
-        const genZItems = sorted;
-
-        const byCategory = {};
-        for (const item of sorted) {
-            if (!byCategory[item.category]) byCategory[item.category] = [];
-            byCategory[item.category].push(item);
-        }
-
-        // ── Build output ─────────────────────────────────────────────────────────
-        const output = {
-            meta: {
-                source: "BookMyShow",
-                city: "Bengaluru",
-                scrapedAt: new Date().toISOString(),
-                totalItems: sorted.length,
-                genZRelevantCount: genZItems.length,
-                countByCategory: Object.fromEntries(Object.entries(byCategory).map(([k, v]) => [k, v.length])),
-            },
-            genZHighlights: genZItems,
-            byCategory,
-        };
-
-        const jsonString = JSON.stringify(output, null, 2);
-
-        const q = (v) => `"${(v || "").toString().replace(/"/g, "'").replace(/\n/g, " ")}"`;
-        const csvString = [
-            ["Emoji", "Category", "Title", "Date", "Duration", "Genres", "Certification", "Language", "Format", "Description", "Cast", "Interested", "Gen Z Score", "Gen Z Relevance", "Link"].join(","),
-            ...sorted.map((e) => [
-                e.emoji, q(e.category), q(e.title),
-                q(e.date || ""), q(e.duration || ""), q(e.genres || ""),
-                q(e.certification || ""), q(e.language || ""), q(e.format || ""),
-                q(e.description || ""), q(e.cast || ""), q(e.interested || ""),
-                e.genZScore, q(e.genZRelevance), q(e.link || ""),
-            ].join(","))
-        ].join("\n");
-
-        // ── Save locally ──────────────────────────────────────────────────────────
-        fs.writeFileSync("bms_bengaluru.json", jsonString);
-        fs.writeFileSync("bms_bengaluru.csv", csvString);
-
-        // ── Upload to S3 ──────────────────────────────────────────────────────────
-        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const jsonKey = `bms_bengaluru/data_${timestamp}.json`;
-        const csvKey = `bms_bengaluru/data_${timestamp}.csv`;
-
-        console.log("\n☁️  Uploading to S3...");
-        try {
-            const jsonUrl = await uploadToS3(jsonKey, jsonString, "application/json");
-            const csvUrl = await uploadToS3(csvKey, csvString, "text/csv");
-            if (jsonUrl) console.log(`✅ JSON → ${jsonUrl}`);
-            if (csvUrl) console.log(`✅ CSV  → ${csvUrl}`);
-        } catch (err) {
-            console.error("❌ S3 upload failed:", err.message);
-        }
-
-        // ── Summary ───────────────────────────────────────────────────────────────
         console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        console.log(`  ✅ SCRAPE COMPLETE | Items: ${sorted.length} | Gen Z: ${genZItems.length}`);
+        console.log(`  ✅ PIPELINE COMPLETE | New Events Processed: ${newEvents.length}`);
         console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-        return output;
-
     } finally {
-        if (browser) await browser.close().catch(console.error);
+        if (browser) await browser.close();
     }
 }
 
