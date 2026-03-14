@@ -22,4 +22,12 @@ module.exports = {
         productCatalogPath: process.env.PRODUCT_CATALOG_PATH || "products.tsv",
         topNProducts: parseInt(process.env.TOP_N_PRODUCTS || "20"),
     },
+
+    trakt: {
+        clientId: process.env.TRAKT_CLIENT_ID || "d7da1d4532a4cef098e031d7abb07309e48b8ba38e97af5a92b0259b816467b9",
+    },
+
+    tmdb: {
+        apiKey: process.env.TMDB_API_KEY || "0017eb7dcb532efaafacdf3eb6ae8ddb",
+    },
 };

@@ -2,6 +2,8 @@
 
 const cron = require("node-cron");
 const { runScraper } = require("../scrapers/bmsScraper");
+const { runTraktFetcher } = require("../scrapers/traktFetcher");
+const { runTmdbFetcher } = require("../scrapers/tmdbFetcher");
 
 /**
  * Starts the cron job that runs the BMS scraper every 6 hours.
@@ -11,6 +13,15 @@ function startScraperJob() {
     cron.schedule("0 */6 * * *", async () => {
         console.log(`\n⏰ [ScraperJob] Triggered at ${new Date().toISOString()}`);
         try {
+            console.log("\n[ScraperJob] Running Pre-Scrape Tasks (Trakt & TMDb)...");
+            try {
+                await runTraktFetcher();
+                await runTmdbFetcher();
+                console.log("[ScraperJob] Pre-Scrape Tasks Completed.");
+            } catch (preErr) {
+                console.error("[ScraperJob] Pre-Scrape Tasks Failed:", preErr.message);
+            }
+            
             await runScraper();
         } catch (err) {
             console.error("[ScraperJob] Run failed:", err.message);

@@ -10,7 +10,6 @@ const { generateEventId } = require("../utils/slugify");
 
 // ─── LISTING URLs ──────────────────────────────────────────────────────────────
 const CATEGORIES = [
-    { category: "Movies", emoji: "🎬", url: "https://in.bookmyshow.com/explore/movies-bengaluru" },
     { category: "Online Streams", emoji: "🎥", url: "https://in.bookmyshow.com/explore/c/stream" },
     { category: "Events", emoji: "🎪", url: "https://in.bookmyshow.com/explore/events-bengaluru" },
     { category: "Plays", emoji: "🎭", url: "https://in.bookmyshow.com/explore/plays-bengaluru" },
@@ -49,7 +48,7 @@ const GENZ_KEYWORDS = {
 };
 
 const CATEGORY_BASE = {
-    "Movies": 1, "Online Streams": 2, "Events": 2,
+    "Online Streams": 2, "Events": 2,
     "Plays": 0, "Sports": 1, "Activities": 2,
 };
 
@@ -145,7 +144,7 @@ async function getLinks(page, cat) {
         let cards = [...document.querySelectorAll(LISTING.cardLink)];
         if (cards.length === 0) {
             cards = [...document.querySelectorAll("a[href]")].filter((a) =>
-                /\/(movies|events|plays|sports|activities|stream)\//i.test(a.href) &&
+                /\/(events|plays|sports|activities|stream)\//i.test(a.href) &&
                 a.innerText?.trim().length > 3
             );
         }
