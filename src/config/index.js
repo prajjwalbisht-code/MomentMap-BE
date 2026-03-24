@@ -2,6 +2,8 @@
 
 require("dotenv").config();
 
+const matchingRules = require("./matchingRules");
+
 module.exports = {
     port: process.env.PORT || 3001,
 
@@ -20,8 +22,11 @@ module.exports = {
     pipeline: {
         targetCity: process.env.TARGET_CITY || "Bengaluru",
         productCatalogPath: process.env.PRODUCT_CATALOG_PATH || "products.tsv",
-        topNProducts: parseInt(process.env.TOP_N_PRODUCTS || "20"),
+        topNProducts: parseInt(process.env.TOP_N_PRODUCTS || "40", 10),
+        debugScoring: process.env.DEBUG_SCORING === "true",
+        enableMatchingTelemetry: process.env.ENABLE_MATCHING_TELEMETRY === "true",
     },
+    matching: matchingRules,
 
     trakt: {
         clientId: process.env.TRAKT_CLIENT_ID || "d7da1d4532a4cef098e031d7abb07309e48b8ba38e97af5a92b0259b816467b9",

@@ -6,117 +6,17 @@ const config = require("../config");
 const { getObjectFromS3 } = require("./s3Service");
 
 let cachedProducts = null;
-
-// ─────────────────────────────────────────────
-// FIELD WEIGHTS
-// Higher = more important for matching
-// ─────────────────────────────────────────────
-const FIELD_WEIGHTS = {
-    color: 4,
-    occasion: 4,
-    ethnicity: 4,
-    pattern: 3,
-    activity: 3,
-    fit: 3,
-    style: 3,
-    theme: 2,
-    material: 2,
-    detail: 2,
-    neckline: 2,
-    length: 2,
-    transparency: 1,
-    hemline_style: 1,
-    size_group: 1,
-};
-
-// ─────────────────────────────────────────────
-// SEMANTIC SYNONYMS
-// If product value is in group, and event has 
-// any value in same group → partial score
-// ─────────────────────────────────────────────
-const SEMANTIC_GROUPS = {
-    color: [
-        ["red", "maroon", "burgundy", "crimson", "scarlet", "ruby", "wine", "deep-red"],
-        ["pink", "blush", "dusty-rose", "fuchsia", "hot-pink", "magenta", "rose-pink"],
-        ["orange", "rust", "burnt-orange", "tangerine", "saffron", "marigold"],
-        ["yellow", "mustard", "gold", "turmeric", "caramel"],
-        ["green", "dark-green", "olive", "sage", "teal", "emerald-green", "forest-green", "lime-green", "bottle-green"],
-        ["blue", "navy", "indigo", "cobalt", "royal-blue", "sapphire", "deep-blue", "sky-blue", "powder-blue"],
-        ["purple", "lavender", "violet", "deep-plum", "lilac"],
-        ["white", "off-white", "cream", "ivory", "pearl-white", "champagne"],
-        ["grey", "charcoal-grey", "light-grey", "slate-grey", "silver"],
-        ["brown", "tan", "beige", "khaki", "caramel", "mocha", "toffee", "light-brown"],
-        ["black", "charcoal"],
-        ["multi", "multicolor"],
-    ],
-    pattern: [
-        ["floral", "botanical", "leaf-print", "flower"],
-        ["geometric", "abstract", "diagonal-stripes", "horizontal-stripes", "vertical-stripes", "checks", "gingham", "mini-checks"],
-        ["embroidered", "embellished", "sequins", "shimmer", "lace", "cut-work"],
-        ["ethnic-motif", "printed", "statement-print", "abstract"],
-        ["solid", "self-design"],
-    ],
-    fit: [
-        ["relaxed", "loose", "oversized", "baggy"],
-        ["slim", "skinny", "slim-fit", "skinny-fit"],
-        ["regular", "regular-fit"],
-    ],
-    style: [
-        ["over-sized", "baggy", "boxy", "loose-fit"],
-        ["slim-fit", "skinny-fit", "tailored", "sheath"],
-        ["wide-leg", "flared", "bell-bottom", "trapeze"],
-        ["straight-fit", "regular-fit", "a-line"],
-        ["cargo", "relaxed"],
-    ],
-    material: [
-        ["cotton", "100%-cotton", "cotton-blend", "cotton-poly-blend", "cotton-lycra-blend", "cotton-rayon-blend", "cotton-viscose-blend", "cotton-linen-blend", "cotton-tencel-blend"],
-        ["rayon", "viscose-rayon", "100%-rayon"],
-        ["linen", "linen-blend"],
-        ["polyester", "100%-polyester", "poly-blend"],
-        ["nylon", "nylon-elastane", "polyamide-spandex"],
-        ["satin", "silk-feel", "georgette-feel", "chiffon-feel"],
-        ["leather", "synthetic"],
-        ["spandex-blend", "elastane"],
-    ],
-    occasion: [
-        ["party", "elevated", "special"],
-        ["casual", "basic-casual"],
-        ["festive", "holiday"],
-        ["workwear", "everyday-work", "formal-work"],
-        ["athletic", "athleisure"],
-    ],
-    activity: [
-        ["festive", "holiday", "dance-and-costumes"],
-        ["concert", "clubbing", "day-and-night"],
-        ["brunch", "cocktail", "dinner-and-ceremonies"],
-        ["athleisure", "walking", "leisure-sport"],
-        ["travel", "beach-and-resort"],
-        ["loungewear", "sleepwear"],
-    ],
-    theme: [
-        ["traditional", "spiritual", "classic"],
-        ["trendy", "contemporary", "fashion"],
-        ["bohemian", "nature", "dainty"],
-        ["designer", "novelty"],
-    ],
-    neckline: [
-        ["v-neck", "keyhole", "cowl"],
-        ["round", "crew", "scoop"],
-        ["halter", "spaghetti-straps", "one-shoulder", "off-shoulder"],
-        ["square", "sweetheart", "straight"],
-        ["turtleneck", "mock", "high-neck"],
-        ["mandarin", "camp", "polo", "button-down"],
-        ["hooded", "half-zip"],
-    ],
-    length: [
-        ["above-waist", "waist", "crop-length"],
-        ["hip", "below-hip"],
-        ["mid-thigh", "upper-thigh", "above-knee"],
-        ["knee", "below-knee"],
-        ["mid-calf", "above-ankle", "ankle"],
-        ["floor", "full"],
-    ],
-};
+const MATCHING_RULES = config.matching || {};
+const FIELD_WEIGHTS = MATCHING_RULES.fieldWeights || {};
+const ACTIVITY_PENALTIES = MATCHING_RULES.activityPenalties || {};
+const OCCASION_PENALTIES = MATCHING_RULES.occasionPenalties || {};
+const SEMANTIC_GROUPS = MATCHING_RULES.semanticGroups || {};
+const TOKEN_CANONICAL_MAP = MATCHING_RULES.tokenCanonicalMap || {};
+const CATEGORY_FAMILIES = MATCHING_RULES.categoryFamilies || {};
+const SEMANTIC_SCORE_MULTIPLIER = MATCHING_RULES.semanticScoreMultiplier || 0.4;
+const BASE_INCLUSION_THRESHOLD = MATCHING_RULES.inclusionThreshold || 12;
+const FALLBACK_THRESHOLD_DELTA = MATCHING_RULES.fallbackThresholdDelta || 2;
+const FALLBACK_MIN_CANDIDATES = MATCHING_RULES.fallbackMinCandidates || 6;
 
 // ─────────────────────────────────────────────
 // LOAD PRODUCT CATALOG
@@ -164,7 +64,7 @@ async function loadProductCatalog() {
             });
         }
 
-        // Normalize all keys (e.g. "Style Code" -> "style_code", "Department" -> "department")
+        // Normalize all keys (e.g. "Style Code" -> "style_code")
         cachedProducts = rawProducts.map(p => {
             const normalized = {};
             for (const [key, val] of Object.entries(p)) {
@@ -174,7 +74,6 @@ async function loadProductCatalog() {
             // Ensure compatibility mappings
             if (normalized.department && !normalized.gender) normalized.gender = normalized.department;
             if (normalized.gender && !normalized.department) normalized.department = normalized.gender;
-            
             return normalized;
         });
 
@@ -192,16 +91,19 @@ async function loadProductCatalog() {
 // ─────────────────────────────────────────────
 
 /**
- * Splits a product field value into an array of clean tokens.
- * Handles comma-separated, pipe-separated, or single values.
+ * FIX: Treats "0" and "n/a" as null sentinels — returns [] for these.
+ * Splits on comma/pipe/semicolon, lowercases, and trims.
  */
 function parseProductValues(raw) {
-    if (!raw) return [];
-    return raw
+    if (!raw && raw !== 0) return [];
+    const str = Array.isArray(raw) ? raw.join(",") : String(raw).trim();
+    // Treat placeholder values as empty
+    if (str === "0" || str.toLowerCase() === "n/a" || str === "" || str === "-") return [];
+    return str
         .toLowerCase()
         .split(/[,|;]+/)
-        .map(v => v.trim())
-        .filter(Boolean);
+        .map(v => normalizeToken(v))
+        .filter(v => v && v !== "0" && v !== "n/a");
 }
 
 /**
@@ -209,14 +111,81 @@ function parseProductValues(raw) {
  */
 function parseEventValues(val) {
     if (!val || val === "not-needed") return [];
-    if (Array.isArray(val)) return val.map(v => v.toLowerCase().trim()).filter(Boolean);
-    if (typeof val === "string") return [val.toLowerCase().trim()];
+    if (Array.isArray(val)) return val.map(v => normalizeToken(v)).filter(Boolean);
+    if (typeof val === "string") return [normalizeToken(val)];
     return [];
+}
+
+function normalizeToken(value) {
+    if (value === null || value === undefined) return "";
+    const raw = String(value).trim().toLowerCase();
+    if (!raw) return "";
+
+    const compact = raw.replace(/[_/\s]+/g, "-");
+    const alnum = compact.replace(/[^a-z0-9-]/g, "");
+
+    return TOKEN_CANONICAL_MAP[alnum] || TOKEN_CANONICAL_MAP[compact] || compact;
+}
+
+function tokenizeCategory(value) {
+    const normalized = normalizeToken(value);
+    if (!normalized) return [];
+    return normalized
+        .split(/[-,|;]+/)
+        .map(v => v.trim())
+        .filter(Boolean);
+}
+
+function categoryToFamilies(category) {
+    const normalized = normalizeToken(category);
+    const tokens = new Set(tokenizeCategory(category));
+    if (normalized) tokens.add(normalized);
+    const families = new Set();
+
+    for (const [family, aliases] of Object.entries(CATEGORY_FAMILIES)) {
+        if (!Array.isArray(aliases)) continue;
+        if (aliases.some(alias => {
+            const cleanAlias = normalizeToken(alias);
+            return normalized.includes(cleanAlias) || tokens.has(cleanAlias);
+        })) {
+            families.add(family);
+        }
+    }
+
+    return families;
+}
+
+function categoriesEquivalent(a, b) {
+    const aNorm = normalizeToken(a);
+    const bNorm = normalizeToken(b);
+    if (!aNorm || !bNorm) return false;
+    if (aNorm === bNorm || aNorm.includes(bNorm) || bNorm.includes(aNorm)) return true;
+
+    const aFamilies = categoryToFamilies(a);
+    const bFamilies = categoryToFamilies(b);
+    if (aFamilies.size && bFamilies.size) {
+        for (const f of aFamilies) {
+            if (bFamilies.has(f)) return true;
+        }
+    }
+    return false;
+}
+
+function getAdaptiveThreshold(kw) {
+    const adaptive = MATCHING_RULES.adaptiveThreshold || {};
+    if (!adaptive.enabled) return BASE_INCLUSION_THRESHOLD;
+
+    const departments = parseEventValues(kw.department);
+    const preferred = Array.isArray(kw.preferred_categories) ? kw.preferred_categories : [];
+    const isBroadEvent = preferred.length >= (adaptive.broadEventPreferredCategoryCount || 10) &&
+        departments.length >= (adaptive.broadDepartmentCount || 3);
+
+    if (!isBroadEvent) return BASE_INCLUSION_THRESHOLD;
+    return Math.max(8, BASE_INCLUSION_THRESHOLD + (adaptive.broadEventDelta || -1));
 }
 
 /**
  * Finds semantic group index for a given value in a field.
- * Returns -1 if not found.
  */
 function getSemanticGroupIndex(field, value) {
     const groups = SEMANTIC_GROUPS[field];
@@ -230,15 +199,13 @@ function getSemanticGroupIndex(field, value) {
 function areSemanticallyRelated(field, valA, valB) {
     const groupA = getSemanticGroupIndex(field, valA);
     if (groupA === -1) return false;
-    const groupB = getSemanticGroupIndex(field, valB);
-    return groupA === groupB;
+    return groupA === getSemanticGroupIndex(field, valB);
 }
 
 /**
  * Scores a single field match between product values and event keyword values.
- * Returns:
- *   weight * 1.0  → exact match
- *   weight * 0.4  → semantic/synonym match
+ *   weight × 1.0  → exact match
+ *   weight × 0.4  → semantic/synonym match
  *   0             → no match
  */
 function scoreField(field, productValues, eventValues, weight) {
@@ -249,11 +216,9 @@ function scoreField(field, productValues, eventValues, weight) {
     for (const pVal of productValues) {
         for (const eVal of eventValues) {
             if (pVal === eVal) {
-                // Exact match — full weight
                 bestScore = Math.max(bestScore, weight * 1.0);
             } else if (areSemanticallyRelated(field, pVal, eVal)) {
-                // Semantic match — partial weight
-                bestScore = Math.max(bestScore, weight * 0.4);
+                bestScore = Math.max(bestScore, weight * SEMANTIC_SCORE_MULTIPLIER);
             }
         }
     }
@@ -265,13 +230,14 @@ function scoreField(field, productValues, eventValues, weight) {
 // HARD FILTER
 // Returns false if product should be excluded
 // ─────────────────────────────────────────────
-function passesHardFilters(product, kw) {
+function passesHardFilters(product, kw, options = {}) {
+    const { relaxPreferred = false } = options;
     const department = parseEventValues(kw.department);
-    const preferred = (kw.preferred_categories || []).map(c => c.toLowerCase().trim());
-    const avoid = (kw.avoid_categories || []).map(c => c.toLowerCase().trim());
+    const preferred = (kw.preferred_categories || []).map(c => normalizeToken(c));
+    const avoid = (kw.avoid_categories || []).map(c => normalizeToken(c));
 
-    const pGender = (product.gender || "").toLowerCase().trim();
-    const pCat = (product.category || "").toLowerCase().trim();
+    const pGender = normalizeToken(product.gender || "");
+    const pCat = normalizeToken(product.category || "");
 
     // 1. Gender/department filter
     if (
@@ -284,12 +250,12 @@ function passesHardFilters(product, kw) {
     }
 
     // 2. Must be in preferred categories
-    if (preferred.length > 0 && pCat && !preferred.some(c => pCat.includes(c) || c.includes(pCat))) {
+    if (!relaxPreferred && preferred.length > 0 && pCat && !preferred.some(c => categoriesEquivalent(pCat, c))) {
         return false;
     }
 
     // 3. Must not be in avoid categories
-    if (avoid.some(c => pCat.includes(c) || c.includes(pCat))) {
+    if (avoid.some(c => categoriesEquivalent(pCat, c))) {
         return false;
     }
 
@@ -297,45 +263,77 @@ function passesHardFilters(product, kw) {
 }
 
 // ─────────────────────────────────────────────
+// PENALTY SCORING
+// Subtracts points for mismatched activity/occasion
+// that contradict the event's vibe.
+// Only penalizes when the product value is NOT
+// present in the event's keyword list at all.
+// ─────────────────────────────────────────────
+function getPenaltyScore(product, kw) {
+    let penalty = 0;
+
+    const eventActivities = parseEventValues(kw.activity);
+    const eventOccasions = parseEventValues(kw.occasion);
+
+    // Activity mismatch penalty
+    const productActivities = parseProductValues(product.activity);
+    for (const pAct of productActivities) {
+        const isInEvent = eventActivities.includes(pAct) ||
+            eventActivities.some(eAct => areSemanticallyRelated("activity", pAct, eAct));
+        if (!isInEvent && ACTIVITY_PENALTIES[pAct] !== undefined) {
+            penalty += ACTIVITY_PENALTIES[pAct];
+        }
+    }
+
+    // Occasion mismatch penalty for very casual products in elevated events
+    const productOccasions = parseProductValues(product.occasion);
+    for (const pOcc of productOccasions) {
+        const isInEvent = eventOccasions.includes(pOcc) ||
+            eventOccasions.some(eOcc => areSemanticallyRelated("occasion", pOcc, eOcc));
+        if (!isInEvent && OCCASION_PENALTIES[pOcc] !== undefined) {
+            penalty += OCCASION_PENALTIES[pOcc];
+        }
+    }
+
+    return penalty; // always negative or 0
+}
+
+// ─────────────────────────────────────────────
 // BONUS SCORES
-// Event-specific logic for extra signal
 // ─────────────────────────────────────────────
 function getBonusScore(product, kw) {
     let bonus = 0;
 
-    const pCat = (product.category || "").toLowerCase();
+    const pCat = normalizeToken(product.category || "");
     const ethnicity = parseEventValues(kw.ethnicity);
-    const preferredCats = (kw.preferred_categories || []).map(c => c.toLowerCase());
+    const preferredCats = (kw.preferred_categories || []).map(c => normalizeToken(c));
 
-    // Bonus: ethnicity alignment
-    // If event is ethnic and product category is ethnic → reward
+    // Ethnicity alignment bonus
     if (ethnicity.includes("ethnic")) {
         const ethnicCategories = ["saree", "kurta", "kurti", "lehenga", "ethnic", "salwar", "dhoti", "sherwani", "anarkali", "sharara", "chaniya"];
-        if (ethnicCategories.some(e => pCat.includes(e))) {
-            bonus += 3;
-        }
+        if (ethnicCategories.some(e => pCat.includes(e))) bonus += 3;
     }
 
-    // Bonus: western event and western product category
     if (ethnicity.includes("western") && !ethnicity.includes("ethnic")) {
-        const westernCategories = ["t-shirt", "shirt", "top", "dress", "jeans", "trouser", "shorts", "skirt", "jumpsuit", "co-ord", "sweatshirt", "jacket"];
-        if (westernCategories.some(w => pCat.includes(w))) {
-            bonus += 2;
-        }
+        const westernCategories = ["t-shirt", "shirt", "top", "dress", "jeans", "trouser", "shorts", "skirt", "jumpsuit", "co-ord", "sweatshirt", "jacket", "sets", "other sets"];
+        if (westernCategories.some(w => pCat.includes(w))) bonus += 2;
     }
 
-    // Bonus: exact preferred category match (not just partial)
-    if (preferredCats.some(c => c === pCat)) {
-        bonus += 2;
-    }
+    // Exact preferred category match
+    if (preferredCats.some(c => categoriesEquivalent(c, pCat))) bonus += 2;
 
-    // Bonus: jewellery fields — if event has jewellery_pattern and product is jewellery
+    // Jewellery bonus
     const jewelleryPattern = parseEventValues(kw.jewellery_pattern);
     const pendantsType = parseEventValues(kw.pendants_type);
     const jewelleryCategories = ["necklace", "earring", "bracelet", "ring", "anklet", "jewellery"];
 
     if (jewelleryCategories.some(j => pCat.includes(j))) {
-        const pJewelleryPattern = parseProductValues(product.jewellery_pattern || product.pattern);
+        const pJewelleryPattern = parseProductValues([
+            product.jewellery_pattern,
+            product.pattern,
+            product.pattern_2,
+            product.pattern_3,
+        ].filter(Boolean).join(","));
         const pPendantType = parseProductValues(product.pendant_type || product.pendants_type);
 
         if (jewelleryPattern.length && pJewelleryPattern.length) {
@@ -346,32 +344,26 @@ function getBonusScore(product, kw) {
         }
     }
 
-    // Bonus: surface_styling match for ethnic/elevated events
+    // Surface styling bonus
     const surfaceStyling = parseEventValues(kw.surface_styling);
     const pSurface = parseProductValues(product.surface_styling || product.fabric_finish);
     if (surfaceStyling.length && pSurface.length) {
         bonus += scoreField("pattern", pSurface, surfaceStyling, 2);
     }
 
-    // Bonus: treatment/distress for denim products
+    // Treatment / distress bonus
     const treatment = parseEventValues(kw.treatment);
     const distress = parseEventValues(kw.distress);
     const pTreatment = parseProductValues(product.treatment || product.wash);
     const pDistress = parseProductValues(product.distress);
 
-    if (treatment.length && pTreatment.length) {
-        bonus += scoreField("pattern", pTreatment, treatment, 1);
-    }
-    if (distress.length && pDistress.length) {
-        bonus += scoreField("pattern", pDistress, distress, 1);
-    }
+    if (treatment.length && pTreatment.length) bonus += scoreField("pattern", pTreatment, treatment, 1);
+    if (distress.length && pDistress.length) bonus += scoreField("pattern", pDistress, distress, 1);
 
-    // Bonus: color_2 / accent color match
+    // Accent color (color_2) bonus
     const color2 = parseEventValues(kw.color_2);
     const pColor2 = parseProductValues(product.color_2 || product.accent_color);
-    if (color2.length && pColor2.length) {
-        bonus += scoreField("color", pColor2, color2, 2);
-    }
+    if (color2.length && pColor2.length) bonus += scoreField("color", pColor2, color2, 2);
 
     return bonus;
 }
@@ -379,61 +371,157 @@ function getBonusScore(product, kw) {
 // ─────────────────────────────────────────────
 // MAIN MATCH FUNCTION
 // ─────────────────────────────────────────────
-async function matchProducts(event) {
+async function matchProductsDetailed(event) {
     const products = await loadProductCatalog();
     if (!products.length) return [];
 
     const kw = event.fashion_keywords;
     if (!kw) return [];
 
-    const scored = [];
+    const threshold = getAdaptiveThreshold(kw);
+    const telemetry = {
+        event_id: event.id,
+        event_title: event.title,
+        total_products: products.length,
+        hard_filtered_out: 0,
+        below_threshold: 0,
+        fallback_triggered: false,
+        fallback_added: 0,
+    };
 
-    for (const product of products) {
-
-        // Step 1: Hard filters
-        if (!passesHardFilters(product, kw)) continue;
-
-        // Step 2: Soft scoring across weighted fields
+    const scoreProduct = (product, thresholdToUse) => {
+        const breakdown = { fields: {}, bonus: 0, penalty: 0, threshold: thresholdToUse };
         let score = 0;
 
         for (const [field, weight] of Object.entries(FIELD_WEIGHTS)) {
             const productValues = parseProductValues(product[field]);
             const eventValues = parseEventValues(kw[field]);
-            score += scoreField(field, productValues, eventValues, weight);
+            const fieldScore = scoreField(field, productValues, eventValues, weight);
+            score += fieldScore;
+            if (fieldScore > 0) breakdown.fields[field] = Math.round(fieldScore * 100) / 100;
         }
 
-        // Step 3: Bonus scoring
-        score += getBonusScore(product, kw);
+        breakdown.bonus = Math.round(getBonusScore(product, kw) * 100) / 100;
+        breakdown.penalty = Math.round(getPenaltyScore(product, kw) * 100) / 100;
+        score += breakdown.bonus + breakdown.penalty;
 
-        // Step 4: Only include products with meaningful score
-        if (score > 0) {
-            scored.push({
-                style_code: product.style_code,
-                score: Math.round(score * 100) / 100, // round to 2dp
-                category: product.category,
-                gender: product.gender,
-            });
+        return {
+            ...product,
+            style_code: product.style_code,
+            score: Math.round(score * 100) / 100,
+            category: product.category,
+            gender: product.gender,
+            breakdown,
+        };
+    };
+
+    const runMatchingPass = (passThreshold, options = {}) => {
+        const localScored = [];
+        for (const product of products) {
+            if (!passesHardFilters(product, kw, options)) {
+                if (!options.relaxPreferred) telemetry.hard_filtered_out += 1;
+                continue;
+            }
+            const result = scoreProduct(product, passThreshold);
+            if (result.score < passThreshold) {
+                if (!options.relaxPreferred) telemetry.below_threshold += 1;
+                continue;
+            }
+            localScored.push(result);
+        }
+        return localScored;
+    };
+
+    const scored = runMatchingPass(threshold);
+
+    if (scored.length < FALLBACK_MIN_CANDIDATES) {
+        telemetry.fallback_triggered = true;
+        const fallbackThreshold = Math.max(8, threshold - FALLBACK_THRESHOLD_DELTA);
+        const fallbackScored = runMatchingPass(fallbackThreshold, { relaxPreferred: true });
+        const existingCodes = new Set(scored.map(s => s.style_code));
+        for (const item of fallbackScored) {
+            if (!existingCodes.has(item.style_code)) {
+                scored.push(item);
+                telemetry.fallback_added += 1;
+            }
         }
     }
 
-    // Step 5: Sort by score descending
+    // Step 6: Sort by score descending
     scored.sort((a, b) => b.score - a.score);
 
-    // Step 6: Optional debug logging
+    // Step 7: Optional debug logging
     if (config.pipeline.debugScoring) {
-        console.log(`\n🎯 Top matches for "${event.title}":`);
+        console.log(`\n🎯 Top matches for "${event.title}" (threshold: ${threshold}):`);
         scored.slice(0, 10).forEach((p, i) => {
             console.log(`  ${i + 1}. ${p.style_code} | ${p.category} | ${p.gender} | score: ${p.score}`);
+            if (config.pipeline.debugScoring === "verbose" || config.pipeline.debugScoring === true) {
+                console.log(`     breakdown: ${JSON.stringify(p.breakdown)}`);
+            }
         });
     }
 
-    // Step 7: Return top N style codes
-    return scored
-        .slice(0, config.pipeline.topNProducts)
-        .map(p => p.style_code);
+    if (config.pipeline.enableMatchingTelemetry) {
+        const scoredTop = scored.slice(0, config.pipeline.topNProducts);
+        const scoreBuckets = { gte20: 0, gte16: 0, gte12: 0, lt12: 0 };
+        const categorySpread = new Set();
+
+        for (const row of scoredTop) {
+            categorySpread.add(normalizeToken(row.category));
+            if (row.score >= 20) scoreBuckets.gte20 += 1;
+            else if (row.score >= 16) scoreBuckets.gte16 += 1;
+            else if (row.score >= 12) scoreBuckets.gte12 += 1;
+            else scoreBuckets.lt12 += 1;
+        }
+
+        console.log(`[matching_telemetry] ${JSON.stringify({
+            ...telemetry,
+            threshold,
+            final_candidates: scored.length,
+            score_buckets: scoreBuckets,
+            top_category_diversity: categorySpread.size,
+        })}`);
+    }
+
+    // Step 8: Return top N style codes
+    return scored.slice(0, config.pipeline.topNProducts);
+}
+
+async function matchProducts(event) {
+    const detailed = await matchProductsDetailed(event);
+    return detailed.map(p => p.style_code);
+}
+
+async function matchProductObjects(event) {
+    const detailed = await matchProductsDetailed(event);
+    return detailed.map(({ breakdown, ...product }) => ({
+        "Style Code": product.style_code || "",
+        Category: product.category || "",
+        "Product Name": product.product_name || "",
+        Brand: product.brand || "",
+        "Image URL 1": product.image_url_1 || "",
+        gender: product.gender || "",
+    }));
 }
 
 // ─────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────
-module.exports = { loadProductCatalog, matchProducts };
+module.exports = {
+    loadProductCatalog,
+    matchProducts,
+    matchProductObjects,
+    __private: {
+        parseProductValues,
+        parseEventValues,
+        scoreField,
+        getPenaltyScore,
+        getBonusScore,
+        passesHardFilters,
+        normalizeToken,
+        categoriesEquivalent,
+        categoryToFamilies,
+        getAdaptiveThreshold,
+        matchProductsDetailed,
+    },
+};

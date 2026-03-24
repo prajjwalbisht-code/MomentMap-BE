@@ -40,11 +40,11 @@ function generateEventId(title, dateStr) {
         if (monthMatch) {
             month = monthMatch[1].toLowerCase();
         } else {
-            // Fallback for numeric months
-            const numMonthMatch = dateStr.match(/\/(\d{1,2})\b/);
+            // Fallback for numeric months: 15/03 or ISO 2026-03-15
+            const numMonthMatch = dateStr.match(/[/-](\d{1,2})\b/);
             if (numMonthMatch) {
                 const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-                const mIdx = parseInt(numMonthMatch[1]) - 1;
+                const mIdx = parseInt(numMonthMatch[1], 10) - 1;
                 if (mIdx >= 0 && mIdx < 12) month = months[mIdx];
             }
         }
