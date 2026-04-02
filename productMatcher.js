@@ -61,12 +61,14 @@ function parseExcel(filePathOrBuffer, fileName = "upload") {
 // ─── STEP 2: LOAD DAY FILES FROM S3 ──────────────────────────────────────────
 
 async function loadAllMonthlyFilesFromS3() {
-  const monthFilePattern = /^\d{4}-\d{2}\.json$/;
-  const allObjects = await listObjectsInS3("");
-  const monthKeys = (allObjects || []).map((o) => o.Key).filter((k) => monthFilePattern.test(k));
+  const monthFilePattern = /^events\/\d{4}-\d{2}\.json$/;
+  const allObjects = await listObjectsInS3("events/");
+  const monthKeys = (allObjects || [])
+    .map((o) => o.Key)
+    .filter((k) => monthFilePattern.test(k));
 
   if (monthKeys.length === 0) {
-    console.warn("⚠️  No YYYY-MM.json files found in S3.");
+    console.warn("⚠️  No events/YYYY-MM.json files found in S3.");
     return new Map();
   }
 
@@ -86,7 +88,7 @@ async function loadAllMonthlyFilesFromS3() {
 // ─── STEP 2.5: MANAGE PRODUCT CATALOG IN S3 ──────────────────────────────────
 
 async function loadExistingCatalog() {
-  const catalogPath = config.pipeline.productCatalogPath;
+  const catalogPath = config.pipeline.productCatalogPath || "products/total_products.json";
   if (!catalogPath) return [];
 
   const key = catalogPath.startsWith("s3://") ? catalogPath.replace(/^s3:\/\/[^\/]+\//, "") : catalogPath;
@@ -122,7 +124,7 @@ async function loadExistingCatalog() {
 }
 
 async function saveCatalogToS3(products) {
-  let key = config.pipeline.productCatalogPath || "products.json";
+  let key = config.pipeline.productCatalogPath || "products/total_products.json";
   if (key.startsWith("s3://")) key = key.replace(/^s3:\/\/[^\/]+\//, "");
   if (key.endsWith(".tsv")) key = key.replace(".tsv", ".json");
   await uploadToS3(key, JSON.stringify(products, null, 2), "application/json");
@@ -207,8 +209,16 @@ async function runProductMatcherFromBuffer(buffer, fileName = "upload.xlsx", dry
   return _run(products, dryRun);
 }
 
+async function runProductMatcherFromProducts(productsArray, dryRun = false) {
+  if (!Array.isArray(productsArray)) {
+    throw new Error("productsArray must be an array");
+  }
+  return _run(productsArray, dryRun);
+}
+
 module.exports = {
   runProductMatcher,
   runProductMatcherFromBuffer,
   parseExcel,
+  runProductMatcherFromProducts,
 };
