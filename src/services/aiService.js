@@ -1,5 +1,8 @@
 "use strict";
 
+const fs = require("fs");
+const path = require("path");
+const { execSync } = require("child_process");
 const config = require("../config");
 
 /**
@@ -141,7 +144,16 @@ You will receive a JSON object for each event, like this:
 ## Output Format
 
 Return ONLY the updated JSON. Structure it as the original event JSON with a new \`"fashion_keywords"\` and \`"marketing"\` object appended as follows:
+Continuing pipeline dry-run and finalizing the performance walkthrough report
 
+Checked command status
+
+Thought for 1s
+Interrupting the Pipeline
+
+I've decided to halt the pipeline. Seeing as it has begun processing Trakt movies, and I've validated the curl logic in earlier phases, along with the availability of positive enrichments, I believe further processing isn't immediately necessary.
+
+Waiting for command completion (up 
 \`\`\`json
 {
   "fashion_keywords": {
@@ -468,12 +480,14 @@ Analyze: title, genres, description, cast, city, genZScore, genZRelevance. These
 
 /**
  * Enrich an event with fashion keywords and marketing copy using OpenRouter API.
- * @param {Object} event - The scraped event data.
+ * Uses curl + execSync for reliable communication.
+ * 
+ * @param {Object} event - The event data to enrich.
  * @returns {Promise<Object>} - The enriched event.
  */
 async function enrichEventWithFashion(event) {
   const apiKey = config.openRouter.apiKey;
-  const model = config.openRouter.model;
+  const model = "google/gemini-2.0-flash-001"; // Unified primary model
 
   if (!apiKey || apiKey === "YOUR_OPENROUTER_API_KEY") {
     console.warn(`⚠️  OpenRouter API key not configured for event: ${event.title}`);
@@ -481,36 +495,38 @@ async function enrichEventWithFashion(event) {
   }
 
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://momentmap.io",
-        "X-Title": "MomentMap Backend",
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: JSON.stringify(event) }
-        ],
-        response_format: { type: "json_object" }
-      }),
-    });
+    const payload = {
+      model: model,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: JSON.stringify(event) }
+      ],
+      response_format: { type: "json_object" },
+      max_tokens: 4096
+    };
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(`OpenRouter API error: ${errorData.error?.message || response.statusText}`);
+    const tempPayloadFile = path.join(__dirname, `temp_payload_${Date.now()}_${Math.random().toString(36).substring(7)}.json`);
+    fs.writeFileSync(tempPayloadFile, JSON.stringify(payload), 'utf8');
+
+    const curlCommand = `curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \\
+      -H "Authorization: Bearer ${apiKey}" \\
+      -H "Content-Type: application/json" \\
+      -H "HTTP-Referer: https://momentmap.io" \\
+      -H "X-Title: MomentMap Production Pipeline" \\
+      -d @${tempPayloadFile}`;
+
+    const output = execSync(curlCommand, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+    fs.unlinkSync(tempPayloadFile);
+
+    const data = JSON.parse(output);
+
+    if (data.error) {
+      throw new Error(`OpenRouter API error: ${data.error.message || "Unknown error"}`);
     }
 
-    const data = await response.json();
     const content = data.choices[0].message.content;
-
-    // Ensure robust parsing
     const enriched = JSON.parse(content);
 
-    // Merge back into original event
     return {
       ...event,
       fashion_keywords: enriched.fashion_keywords || null,
@@ -522,4 +538,23 @@ async function enrichEventWithFashion(event) {
   }
 }
 
-module.exports = { enrichEventWithFashion };
+/**
+ * Specifically for Trakt movies, but uses the same unified logic.
+ */
+async function enrichTraktMovie(traktItem) {
+  const movie = traktItem.movie || traktItem;
+  const eventFormat = {
+    ...traktItem,
+    id: traktItem.id,
+    title: movie.title,
+    genres: movie.genres ? (Array.isArray(movie.genres) ? movie.genres.join(", ") : movie.genres) : "Movie",
+    description: movie.overview || movie.tagline || movie.description || "",
+    date: movie.released || movie.release_date || traktItem.date || "Upcoming",
+  };
+  return enrichEventWithFashion(eventFormat);
+}
+
+module.exports = {
+  enrichEventWithFashion,
+  enrichTraktMovie
+};

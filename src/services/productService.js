@@ -21,8 +21,21 @@ const FALLBACK_MIN_CANDIDATES = MATCHING_RULES.fallbackMinCandidates || 6;
 // ─────────────────────────────────────────────
 // LOAD PRODUCT CATALOG
 // ─────────────────────────────────────────────
-async function loadProductCatalog() {
-    if (cachedProducts) return cachedProducts;
+function setCachedProducts(products) {
+    if (Array.isArray(products)) {
+        cachedProducts = products;
+        console.log(`📡 [ProductService] Manually updated cached catalog with ${products.length} products.`);
+    }
+}
+
+function clearCache() {
+    cachedProducts = null;
+    console.log("🧹 [ProductService] Product catalog cache cleared.");
+}
+
+async function loadProductCatalog(forceRefresh = false) {
+    if (cachedProducts && !forceRefresh) return cachedProducts;
+    if (forceRefresh) clearCache();
 
     const catalogPath = config.pipeline.productCatalogPath;
     let content = "";
@@ -41,8 +54,18 @@ async function loadProductCatalog() {
             if (fs.existsSync(fullPath)) {
                 content = fs.readFileSync(fullPath, "utf-8");
             } else {
-                console.warn(`⚠️  Product catalog not found at ${fullPath}. Using empty catalog.`);
-                return [];
+                // If not found locally, and it doesn't have an absolute path prefix, 
+                // try loading from S3 as a fallback (it might be a key)
+                if (!path.isAbsolute(catalogPath)) {
+                    console.log(`⚠️  Local catalog not found. Trying S3 key: ${catalogPath}...`);
+                    content = await getObjectFromS3(catalogPath);
+                    isJson = catalogPath.endsWith(".json");
+                }
+
+                if (!content) {
+                    console.warn(`⚠️  Product catalog not found at ${fullPath} or in S3. Using empty catalog.`);
+                    return [];
+                }
             }
         }
 
@@ -74,6 +97,14 @@ async function loadProductCatalog() {
             // Ensure compatibility mappings
             if (normalized.department && !normalized.gender) normalized.gender = normalized.department;
             if (normalized.gender && !normalized.department) normalized.department = normalized.gender;
+
+            // Standardize product identification and media keys
+            if (normalized.imageurl && !normalized.image_url_1) normalized.image_url_1 = normalized.imageurl;
+            if (normalized.stylecode && !normalized.style_code) normalized.style_code = normalized.stylecode;
+            if ((normalized.name || normalized.productname) && !normalized.product_name) {
+                normalized.product_name = normalized.name || normalized.productname;
+            }
+
             return normalized;
         });
 
@@ -495,11 +526,11 @@ async function matchProducts(event) {
 async function matchProductObjects(event) {
     const detailed = await matchProductsDetailed(event);
     return detailed.map(({ breakdown, ...product }) => ({
-        "Style Code": product.style_code || "",
+        "Style Code": product.style_code || product.stylecode || "",
         Category: product.category || "",
-        "Product Name": product.product_name || "",
+        "Product Name": product.product_name || product.name || "",
         Brand: product.brand || "",
-        "Image URL 1": product.image_url_1 || "",
+        "Image URL 1": product.image_url_1 || product.imageurl || "",
         gender: product.gender || "",
     }));
 }
@@ -509,6 +540,8 @@ async function matchProductObjects(event) {
 // ─────────────────────────────────────────────
 module.exports = {
     loadProductCatalog,
+    setCachedProducts,
+    clearCache,
     matchProducts,
     matchProductObjects,
     __private: {

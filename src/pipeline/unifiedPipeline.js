@@ -7,8 +7,7 @@ const { runTraktFetcher } = require("../scrapers/traktFetcher");
 const { listObjectsInS3, getObjectFromS3, uploadToS3 } = require("../services/s3Service");
 const { matchProductObjects } = require("../services/productService");
 const { generateEventId } = require("../utils/slugify");
-const { enrichTraktMovie } = require("../../aiService_trakt");
-const { enrichGeneralEvent } = require("../../aiService_event");
+const { enrichTraktMovie, enrichEventWithFashion } = require("../services/aiService");
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const TMDB_OUT = "tmdb_bollywood_upcoming.json";
@@ -71,7 +70,7 @@ async function runUnifiedPipeline(options = { dryRun: false }) {
   console.log("🧠 Processing new TMDb movies through AI...");
   for (const item of newTmdb) {
     try {
-      const enriched = await enrichTraktMovie(item);
+      const enriched = await enrichEventWithFashion(item);
       processedEvents.push(enriched);
     } catch (e) {
       console.error(`  ❌ Failed to enrich TMDb movie: ${e.message}`);

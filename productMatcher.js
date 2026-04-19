@@ -16,7 +16,7 @@ const path = require("path");
 const XLSX = require("xlsx");
 const { uploadToS3, listObjectsInS3, getObjectFromS3 } = require("./src/services/s3Service");
 const config = require("./src/config");
-const { matchProducts } = require("./src/services/productService");
+const { loadProductCatalog, matchProducts, matchProductObjects, setCachedProducts } = require("./src/services/productService");
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const LOCAL_OUTPUT_FILE = path.join(__dirname, "product_event_matches.json");
@@ -35,15 +35,15 @@ function parseExcel(filePathOrBuffer, fileName = "upload") {
       throw new Error(`Excel file not found: ${filePathOrBuffer}`);
     }
     buffer = fs.readFileSync(filePathOrBuffer);
-    label  = path.basename(filePathOrBuffer);
+    label = path.basename(filePathOrBuffer);
   } else {
     buffer = Buffer.isBuffer(filePathOrBuffer) ? filePathOrBuffer : Buffer.from(filePathOrBuffer);
-    label  = fileName;
+    label = fileName;
   }
 
   const workbook = XLSX.read(buffer, { type: "buffer" });
-  const sheet    = workbook.Sheets[workbook.SheetNames[0]];
-  const rawRows  = XLSX.utils.sheet_to_json(sheet);
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rawRows = XLSX.utils.sheet_to_json(sheet);
 
   const products = rawRows.map((row) => {
     const cleaned = {};
@@ -89,7 +89,6 @@ async function loadAllMonthlyFilesFromS3() {
 
 async function loadExistingCatalog() {
   const catalogPath = config.pipeline.productCatalogPath || "products/total_products.json";
-  if (!catalogPath) return [];
 
   const key = catalogPath.startsWith("s3://") ? catalogPath.replace(/^s3:\/\/[^\/]+\//, "") : catalogPath;
   let keyToLoad = key;
@@ -99,28 +98,81 @@ async function loadExistingCatalog() {
     if (exists) keyToLoad = jsonKey;
   }
 
-  const content = await getObjectFromS3(keyToLoad);
-  if (!content) return [];
+  const s3Content = await getObjectFromS3(keyToLoad);
+  let products = [];
 
-  try {
-    if (keyToLoad.endsWith(".json")) return JSON.parse(content);
-    if (keyToLoad.endsWith(".tsv")) {
-      const lines = content.trim().split("\n");
-      const headers = lines[0].split("\t").map(h => h.trim());
-      return lines.slice(1).map(line => {
-        const cols = line.split("\t");
-        const obj = {};
-        headers.forEach((h, i) => {
-          const cleanKey = h.toLowerCase().replace(/\s+/g, "_");
-          obj[cleanKey] = cols[i] ? cols[i].trim() : "";
+  if (s3Content) {
+    try {
+      if (keyToLoad.endsWith(".json")) products = JSON.parse(s3Content);
+      else if (keyToLoad.endsWith(".tsv")) {
+        const lines = s3Content.trim().split("\n");
+        const headers = lines[0].split("\t").map(h => h.trim());
+        products = lines.slice(1).map(line => {
+          const cols = line.split("\t");
+          const obj = {};
+          headers.forEach((h, i) => {
+            const cleanKey = h.toLowerCase().replace(/\s+/g, "_");
+            obj[cleanKey] = cols[i] ? cols[i].trim() : "";
+          });
+          return obj;
         });
-        return obj;
-      });
+      }
+    } catch (e) {
+      console.warn("⚠️  Error parsing S3 catalog, falling back to local static catalog.");
     }
-    return [];
-  } catch (e) {
-    return [];
   }
+
+  // BOOTSTRAP/MERGE with local static catalog if it exists and S3 is small
+  const staticPath = path.join(process.cwd(), "products_static.json");
+  if (fs.existsSync(staticPath)) {
+    try {
+      const staticContent = fs.readFileSync(staticPath, "utf-8");
+      const staticProducts = JSON.parse(staticContent);
+      console.log(`📦 Loaded ${staticProducts.length} products from products_static.json`);
+
+      const catalogMap = new Map();
+      // Load static first
+      staticProducts.forEach(p => {
+        const normalized = {};
+        for (const [k, v] of Object.entries(p)) {
+          normalized[k.trim().toLowerCase().replace(/\s+/g, "_")] = v;
+        }
+        const code = normalized.style_code;
+        if (code) catalogMap.set(String(code).toLowerCase(), normalized);
+      });
+      // Overlay S3 (S3 might have updates, but preserve essential fields if S3 is empty)
+      products.forEach(p => {
+        const normalized = {};
+        for (const [k, v] of Object.entries(p)) {
+          normalized[k.trim().toLowerCase().replace(/\s+/g, "_")] = v;
+        }
+        const code = normalized.style_code;
+        if (code) {
+          const lowerCode = String(code).toLowerCase();
+          if (catalogMap.has(lowerCode)) {
+            const existing = catalogMap.get(lowerCode);
+            // Merge: S3 values win UNLESS they are empty and static has them
+            const merged = { ...existing };
+            for (const [k, v] of Object.entries(normalized)) {
+              if (v !== null && v !== undefined && v !== "") {
+                merged[k] = v;
+              }
+            }
+            catalogMap.set(lowerCode, merged);
+          } else {
+            catalogMap.set(lowerCode, normalized);
+          }
+        }
+      });
+
+      products = Array.from(catalogMap.values());
+      console.log(`📊 Unified catalog size: ${products.length} products.`);
+    } catch (e) {
+      console.warn(`⚠️  Failed to load static catalog: ${e.message}`);
+    }
+  }
+
+  return products;
 }
 
 async function saveCatalogToS3(products) {
@@ -143,25 +195,93 @@ async function matchAndMerge(products, monthFileMap, dryRun = false) {
     }
   }
 
-  const totalEvents   = allEvents.length;
-  const matchSummary  = {};
-  let   totalMatches  = 0;
-  let   eventsUpdated = 0;
+  const totalEvents = allEvents.length;
+  const matchSummary = {};
+  let totalMatches = 0;
+  let eventsUpdated = 0;
 
   console.log(`\n🔗 Re-matching ${totalEvents} events using unified service logic...`);
 
   for (const { monthKey, dayKey, event } of allEvents) {
-    const oldProducts = new Set(event.products || []);
-    const newMatches = await matchProducts(event);
-    const merged = new Set([...oldProducts, ...newMatches]);
-    
-    if (merged.size > oldProducts.size) {
-        const added = [...merged].filter(code => !oldProducts.has(code));
-        event.products = [...merged];
-        monthFileMap.get(monthKey).dirty = true;
-        matchSummary[event.id] = added;
-        totalMatches += added.length;
+    const rawProducts = event.products || [];
+    const normalizedProducts = [];
+    const existingCodes = new Set();
+
+    const catalog = await loadProductCatalog();
+    const toDisplayObject = (p) => {
+      // Use normalized keys for lookup
+      const img = p.image_url_1 || p.image_url || p.imageurl || p.image || p.img || p["Image URL 1"] || "";
+      const code = p.style_code || p.stylecode || p["Style Code"] || "";
+      const name = p.product_name || p.productname || p.name || p["Product Name"] || "";
+      const brand = p.brand || p["Brand"] || "";
+      const cat = p.category || p["Category"] || "";
+      const gen = p.gender || p.Gender || p.department || "";
+
+      return {
+        "Style Code": code,
+        Category: cat,
+        "Product Name": name,
+        Brand: brand,
+        "Image URL 1": img,
+        gender: gen,
+      };
+    };
+
+    // 1. Convert existing strings/objects to standardized objects
+    for (const p of rawProducts) {
+      let code = null;
+      if (typeof p === "string") {
+        code = p.toLowerCase();
+      } else {
+        const c = p.style_code || p["Style Code"] || p.styleCode;
+        if (c) code = String(c).toLowerCase();
+      }
+
+      if (code && !existingCodes.has(code)) {
+        if (typeof p === "string") {
+          const catProduct = catalog.find(cp =>
+            String(cp.style_code || cp["Style Code"] || cp.styleCode).toLowerCase() === code
+          );
+          if (catProduct) {
+            normalizedProducts.push(toDisplayObject(catProduct));
+          } else {
+            normalizedProducts.push(p);
+          }
+        } else {
+          normalizedProducts.push(toDisplayObject(p));
+        }
+        existingCodes.add(code);
+      }
+    }
+
+    // 2. Add new matches from the current pipeline
+    const newMatches = await matchProductObjects(event);
+    const addedCodes = [];
+
+    for (const match of newMatches) {
+      const code = match.style_code || match["Style Code"] || match.styleCode;
+      const normalizedCode = String(code).toLowerCase();
+      if (!existingCodes.has(normalizedCode)) {
+        normalizedProducts.push(match);
+        existingCodes.add(normalizedCode);
+        addedCodes.push(normalizedCode);
+      }
+    }
+
+    // Force dirty if we converted objects or changed anything
+    // (In this case, we want to fix the keys, so any change in product format should trigger dirty)
+    const productsChanged = addedCodes.length > 0 ||
+      normalizedProducts.length !== rawProducts.length ||
+      JSON.stringify(normalizedProducts) !== JSON.stringify(rawProducts);
+
+    if (productsChanged) {
+      event.products = normalizedProducts;
+      monthFileMap.get(monthKey).dirty = true;
+      if (addedCodes.length > 0) {
+        matchSummary[event.id] = addedCodes;
+        totalMatches += addedCodes.length;
         eventsUpdated++;
+      }
     }
   }
 
@@ -189,12 +309,34 @@ async function matchAndMerge(products, monthFileMap, dryRun = false) {
 async function _run(newProducts, dryRun) {
   const existingCatalog = await loadExistingCatalog();
   const catalogMap = new Map();
-  [...existingCatalog, ...newProducts].forEach(p => {
-    const code = p.style_code || p["style code"];
-    if (code) catalogMap.set(String(code).toLowerCase(), p);
-  });
+
+  const ingest = (p) => {
+    const normalized = {};
+    for (const [k, v] of Object.entries(p)) {
+      normalized[k.trim().toLowerCase().replace(/\s+/g, "_")] = v;
+    }
+
+    // Canonical mapping for essential fields if missing
+    if (!normalized.style_code && normalized.stylecode) normalized.style_code = normalized.stylecode;
+    if (!normalized.image_url_1) {
+      normalized.image_url_1 = normalized.imageurl || normalized.image || normalized.img || normalized.image_url || "";
+    }
+    if (!normalized.product_name && normalized.productname) normalized.product_name = normalized.productname;
+    if (!normalized.product_name && normalized.name) normalized.product_name = normalized.name;
+
+    const code = normalized.style_code;
+    if (code) catalogMap.set(String(code).toLowerCase(), normalized);
+  };
+
+  existingCatalog.forEach(ingest);
+  newProducts.forEach(ingest);
+
   const updatedCatalog = Array.from(catalogMap.values());
   if (!dryRun) await saveCatalogToS3(updatedCatalog);
+
+  // Sync with productService for matching
+  setCachedProducts(updatedCatalog);
+
   const monthFileMap = await loadAllMonthlyFilesFromS3();
   return matchAndMerge(updatedCatalog, monthFileMap, dryRun);
 }

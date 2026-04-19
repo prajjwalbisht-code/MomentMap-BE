@@ -1,8 +1,10 @@
-// Standalone enrichment test — uses the EXACT system prompt from aiService.js
-// Run with: node test_openrouter.js
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+require('dotenv').config();
 
-const API_KEY = "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";
-const MODEL = "google/gemini-2.0-flash-001"; // Same model as production pipeline
+const API_KEY = process.env.OPENROUTER_API_KEY;
+const MODEL = "google/gemini-2.0-flash-001";
 
 // ─── Copied verbatim from src/services/aiService.js ──────────────────────────
 const SYSTEM_PROMPT = `
@@ -140,28 +142,28 @@ marketing fields:
 - Social: chronically online, meme-adjacent. Copy OR content format ideas (polls, challenges, UGC).
 - NO banned phrases: "Explore our collection", "Shop now", "Elevate your wardrobe", "Find your perfect style"
 - Max 10 words per line. Fashion must be the through-line.
-- genZScore 8-10 → unhinged. genZScore 4-7 → witty. genZScore 1-3 → warm-clever.
+- use lyrics of a artist if its a concert and fits the vibe.
 `;
 
 // ─── Test event ───────────────────────────────────────────────────────────────
 const TEST_EVENT = {
   "category": "Events",
-  "emoji": "🪔",
+  "emoji": "🎤",
   "city": "Delhi",
-  "title": "Diwali Festival Celebration",
-  "date": "12 Nov, 2026",
-  "duration": "5h",
-  "genres": "Festival, Cultural",
-  "certification": "All Ages",
-  "language": "Hindi, English",
+  "title": "YE LIVE IN INDIA – NEW DELHI",
+  "date": "May 2026",
+  "duration": "3h",
+  "genres": "Hip-Hop, Rap",
+  "certification": "16+",
+  "language": "English",
   "format": null,
-  "description": "Celebrate Diwali with lights, fireworks, music, food stalls, and festive cultural performances across the city.",
-  "cast": "Local Artists & Performers",
+  "description": "Ye makes his historic India debut at Jawaharlal Nehru Stadium. One of the most genre-defining artists of all time, live in Delhi for the very first time. An unmissable, once-in-a-generation concert experience.",
+  "cast": "Ye (Kanye West)",
   "crew": null,
-  "interested": "80K+ are interested",
+  "interested": "120K+ are interested",
   "image": "...",
   "link": "...",
-  "genZScore": 8,
+  "genZScore": 9,
   "genZRelevance": "🔥 Very High"
 };
 
@@ -174,31 +176,35 @@ async function testEnrichment() {
   const startTime = Date.now();
 
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${API_KEY}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://momentmap.io",
-        "X-Title": "MomentMap Enrichment Test",
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: JSON.stringify(TEST_EVENT) }
-        ],
-        response_format: { type: "json_object" }
-      }),
-    });
+    const payload = {
+      model: MODEL,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: JSON.stringify(TEST_EVENT) }
+      ],
+      response_format: { type: "json_object" },
+      max_tokens: 4096
+    };
+
+    const tempPayloadFile = path.join(__dirname, 'temp_payload_openrouter.json');
+    fs.writeFileSync(tempPayloadFile, JSON.stringify(payload), 'utf8');
+
+    const curlCommand = `curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \\
+      -H "Authorization: Bearer ${API_KEY}" \\
+      -H "Content-Type: application/json" \\
+      -H "HTTP-Referer: https://momentmap.io" \\
+      -H "X-Title: MomentMap Enrichment Test" \\
+      -d @${tempPayloadFile}`;
+
+    const output = execSync(curlCommand, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+    fs.unlinkSync(tempPayloadFile);
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const data = await response.json();
+    const data = JSON.parse(output);
 
-    if (!response.ok) {
-      console.error("❌ API request failed:");
-      console.error(`   Status : ${response.status} ${response.statusText}`);
-      console.error("   Body   :", JSON.stringify(data, null, 2));
+    if (data.error) {
+      console.error("❌ OpenRouter API error:");
+      console.error("   Error  :", JSON.stringify(data.error, null, 2));
       return;
     }
 

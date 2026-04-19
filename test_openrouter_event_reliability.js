@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { execSync } = require("child_process");
 const config = require("./src/config");
 
 const SYSTEM_PROMPT = `
@@ -124,29 +125,33 @@ function resolveInputEvent() {
 async function callOpenRouter(eventInput) {
   const startedAt = new Date().toISOString();
   const startMs = Date.now();
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://momentmap.io",
-      "X-Title": "MomentMap OpenRouter Reliability Test",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: JSON.stringify(eventInput) },
-      ],
-      response_format: { type: "json_object" },
-    }),
-  });
+  const payload = {
+    model,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: JSON.stringify(eventInput) },
+    ],
+    response_format: { type: "json_object" },
+  };
+
+  const tempPayloadFile = path.join(__dirname, 'temp_payload_reliability.json');
+  fs.writeFileSync(tempPayloadFile, JSON.stringify(payload), 'utf8');
+
+  const curlCommand = `curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \\
+    -H "Authorization: Bearer ${apiKey}" \\
+    -H "Content-Type: application/json" \\
+    -H "HTTP-Referer: https://momentmap.io" \\
+    -H "X-Title: MomentMap OpenRouter Reliability Test" \\
+    -d @${tempPayloadFile}`;
+
+  const output = execSync(curlCommand, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+  fs.unlinkSync(tempPayloadFile);
 
   const durationMs = Date.now() - startMs;
-  const raw = await response.json();
+  const raw = JSON.parse(output);
 
-  if (!response.ok) {
-    const err = raw?.error?.message || response.statusText || "Unknown API error";
+  if (raw.error) {
+    const err = raw?.error?.message || "Unknown API error";
     throw new Error(err);
   }
 
