@@ -4,7 +4,12 @@ const express = require("express");
 const router = express.Router();
 const multer = require("multer");
 const { getObjectFromS3 } = require("../services/s3Service");
-const { runProductMatcherFromBuffer, runProductMatcherFromProducts } = require("../../productMatcher");
+const {
+    runProductMatcherFromBuffer,
+    runProductMatcherFromProducts,
+    loadExistingCatalog,
+    saveCatalogToS3
+} = require("../../productMatcher");
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
@@ -120,6 +125,75 @@ router.post("/", upload.single("file"), async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to process product upload.",
+            error: err.message
+        });
+    }
+});
+
+/**
+ * DELETE /api/products
+ * Removes a product from the total catalog in S3 by name or styleCode.
+ */
+router.delete("/", async (req, res) => {
+    const { name, styleCode } = req.query;
+    console.log(`\n🗑️ [ProductsAPI] DELETE /api/products — Name: ${name}, StyleCode: ${styleCode}`);
+
+    if (!name && !styleCode) {
+        return res.status(400).json({
+            success: false,
+            message: "Missing deletion criteria. Provide 'name' or 'styleCode'."
+        });
+    }
+
+    try {
+        const catalog = await loadExistingCatalog();
+        if (!catalog || !Array.isArray(catalog)) {
+            return res.status(404).json({
+                success: false,
+                message: "Product catalog not found or empty."
+            });
+        }
+
+        const initialCount = catalog.length;
+        const searchTerm = String(styleCode || name || "").toLowerCase().trim();
+
+        // 1. Identify products to delete and collect their style codes
+        const toDelete = catalog.filter(p => {
+            const pName = String(p.name || p["Product Product Name"] || p["Product Name"] || "").toLowerCase().trim();
+            const pStyle = String(p.style_code || p.styleCode || p["Style Code"] || "").toLowerCase().trim();
+            return pName === searchTerm || pStyle === searchTerm;
+        });
+
+        if (toDelete.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: `Product not found with search term: "${searchTerm}"`
+            });
+        }
+
+        const styleCodesToPurge = [...new Set(toDelete.map(p => p.style_code || p.styleCode || p["Style Code"]))];
+
+        // 2. Update and save the catalog
+        const updatedCatalog = catalog.filter(p => !toDelete.includes(p));
+        await saveCatalogToS3(updatedCatalog);
+
+        console.log(`✅ [ProductsAPI] Catalog updated. Removed ${toDelete.length} items.`);
+
+        // 3. Purge those products from all event recommendations
+        const purgeResult = await purgeProductFromEvents(styleCodesToPurge);
+
+        return res.json({
+            success: true,
+            message: "Complete deletion successful.",
+            deleted_from_catalog: toDelete.length,
+            purged_from_events: purgeResult?.totalRemoved || 0,
+            event_files_updated: purgeResult?.filesUpdated || 0
+        });
+    } catch (err) {
+        console.error("❌ [ProductsAPI] DELETE error:", err.message);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to delete product.",
             error: err.message
         });
     }

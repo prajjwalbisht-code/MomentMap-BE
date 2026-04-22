@@ -358,9 +358,55 @@ async function runProductMatcherFromProducts(productsArray, dryRun = false) {
   return _run(productsArray, dryRun);
 }
 
+/**
+ * purgeProductFromEvents
+ * Removes products from all monthly event files in S3 by style code.
+ * @param {string[]} styleCodes - Array of style codes to remove.
+ */
+async function purgeProductFromEvents(styleCodes) {
+  if (!Array.isArray(styleCodes) || styleCodes.length === 0) return;
+  const codesToPurge = new Set(styleCodes.map(c => String(c).toLowerCase()));
+
+  console.log(`\n🧹 [Purge] Starting purge of ${codesToPurge.size} products from all S3 events...`);
+
+  const monthFileMap = await loadAllMonthlyFilesFromS3();
+  let totalRemoved = 0;
+  let filesUpdated = 0;
+
+  for (const [monthKey, { data }] of monthFileMap) {
+    let fileDirty = false;
+    for (const event of data) {
+      if (!event.products || !Array.isArray(event.products)) continue;
+
+      const initialCount = event.products.length;
+      event.products = event.products.filter(p => {
+        const code = p.style_code || p.styleCode || p["Style Code"];
+        return !codesToPurge.has(String(code).toLowerCase());
+      });
+
+      if (event.products.length !== initialCount) {
+        totalRemoved += (initialCount - event.products.length);
+        fileDirty = true;
+      }
+    }
+
+    if (fileDirty) {
+      await uploadToS3(monthKey, JSON.stringify(data, null, 2), "application/json");
+      console.log(`   ✅ Purged and updated: ${monthKey}`);
+      filesUpdated++;
+    }
+  }
+
+  console.log(`✨ [Purge] Complete. Removed ${totalRemoved} product links across ${filesUpdated} files.`);
+  return { totalRemoved, filesUpdated };
+}
+
 module.exports = {
   runProductMatcher,
   runProductMatcherFromBuffer,
   parseExcel,
   runProductMatcherFromProducts,
+  loadExistingCatalog,
+  saveCatalogToS3,
+  purgeProductFromEvents,
 };
